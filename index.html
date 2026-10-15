@@ -32,7 +32,11 @@
                     </div>
                     <div>
                         <h1 class="text-xl font-bold text-slate-900">Dashboard Update & Rekon Harga</h1>
-                        <p class="text-xs text-slate-500">Auto-Save LocalStorage & Master Data Audit System</p>
+                        <p class="text-xs text-slate-500">Database Bersama & Master Data Audit System</p>
+                        <p class="text-[11px] mt-0.5 flex items-center gap-1.5">
+                            <span class="inline-block w-2 h-2 rounded-full" :class="{ 'bg-emerald-500': syncStatus === 'online', 'bg-amber-400 animate-pulse': syncStatus === 'loading' || syncStatus === 'saving', 'bg-rose-500': syncStatus === 'error' }"></span>
+                            <span class="text-slate-500" x-text="syncStatus === 'online' ? 'Tersinkron (real time) · ' + lastSyncedAt : syncStatus === 'saving' ? 'Menyimpan...' : syncStatus === 'loading' ? 'Memuat data...' : 'Koneksi terputus, mencoba lagi...'"></span>
+                        </p>
                     </div>
                 </div>
             </div>
@@ -54,7 +58,7 @@
                     <span>Log History (.xlsx)</span>
                 </button>
 
-                <button @click="resetLocalStorage()" class="inline-flex items-center space-x-1 px-2.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-medium rounded-lg transition-colors" title="Reset Simpanan Lokal">
+                <button @click="resetData()" class="inline-flex items-center space-x-1 px-2.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-medium rounded-lg transition-colors" title="Reset Data ke Data Awal (semua pengguna)">
                     <i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i>
                     <span>Reset</span>
                 </button>
@@ -354,48 +358,116 @@
                     moqPrices: {}
                 },
 
-                initData() {
-                    // Check LocalStorage first
-                    const savedItems = localStorage.getItem('rekon_master_items');
-                    const savedLogs = localStorage.getItem('rekon_history_logs');
+                syncStatus: 'loading', // loading | online | saving | error
+                lastSyncedAt: null,
+                pollTimer: null,
 
-                    if (savedItems) {
-                        this.items = JSON.parse(savedItems);
-                    } else {
-                        // Default sample dataset
-                        this.items = [
-                            { itemCode: 'AHB1010001', itemName: 'Dus AH Beauty Peel Off Lip Gloss US', customerCode: 'CMF00016', customerName: 'Aesthetic & Health Beauty, PT', moqPrices: { '5K': 1511, '10K': 1511, '250K': 390 } },
-                            { itemCode: 'ARK1010001', itemName: 'Dus Daviena Perfect Powder Cream Ivory', customerCode: 'CMF00033', customerName: 'Athena Royal Kosmetika, PT', moqPrices: { '50K': 750, '100K': 680, '200K': 640 } },
-                            { itemCode: 'ARK1010004', itemName: 'Dus Daviena Tinted Day Cream', customerCode: 'CMF00033', customerName: 'Athena Royal Kosmetika, PT', moqPrices: { '10K': 1050, '20K': 740, '50K': 560, '75K': 515, '100K': 490 } },
-                            { itemCode: 'BGS1010001', itemName: 'Dus Brighty AHA Booster Serum', customerCode: 'CMF00006', customerName: 'Brighty Global Sinergi, PT', moqPrices: { '30K': 1000 } },
-                            { itemCode: 'TTI1010026', itemName: 'Dus Tombacco Sisha Panraas 100g', customerCode: 'CMF00032', customerName: 'Tombacco Tembakau Indonesia, PT', moqPrices: { '3K': 3147, '5K': 2118, '10K': 1348 } }
-                        ];
+                sampleItems() {
+                    return [
+                        { itemCode: 'AHB1010001', itemName: 'Dus AH Beauty Peel Off Lip Gloss US', customerCode: 'CMF00016', customerName: 'Aesthetic & Health Beauty, PT', moqPrices: { '5K': 1511, '10K': 1511, '250K': 390 } },
+                        { itemCode: 'ARK1010001', itemName: 'Dus Daviena Perfect Powder Cream Ivory', customerCode: 'CMF00033', customerName: 'Athena Royal Kosmetika, PT', moqPrices: { '50K': 750, '100K': 680, '200K': 640 } },
+                        { itemCode: 'ARK1010004', itemName: 'Dus Daviena Tinted Day Cream', customerCode: 'CMF00033', customerName: 'Athena Royal Kosmetika, PT', moqPrices: { '10K': 1050, '20K': 740, '50K': 560, '75K': 515, '100K': 490 } },
+                        { itemCode: 'BGS1010001', itemName: 'Dus Brighty AHA Booster Serum', customerCode: 'CMF00006', customerName: 'Brighty Global Sinergi, PT', moqPrices: { '30K': 1000 } },
+                        { itemCode: 'TTI1010026', itemName: 'Dus Tombacco Sisha Panraas 100g', customerCode: 'CMF00032', customerName: 'Tombacco Tembakau Indonesia, PT', moqPrices: { '3K': 3147, '5K': 2118, '10K': 1348 } }
+                    ];
+                },
+
+                async initData() {
+                    try {
+                        const data = await this.api('GET', '/api/data');
+                        // Data saved in this browser before the switch to the shared database.
+                        const savedItems = localStorage.getItem('rekon_master_items');
+                        const savedLogs = localStorage.getItem('rekon_history_logs');
+                        const migrated = localStorage.getItem('rekon_migrated_to_db');
+                        const localData = savedItems && !migrated ? {
+                            items: JSON.parse(savedItems),
+                            historyLogs: savedLogs ? JSON.parse(savedLogs).reverse() : []
+                        } : null;
+
+                        if (data.items.length === 0) {
+                            // First run on the shared database: upload this browser's data (or the sample dataset).
+                            const seeded = await this.api('POST', '/api/import', {
+                                items: localData ? localData.items : this.sampleItems(),
+                                historyLogs: localData ? localData.historyLogs : [],
+                                onlyIfEmpty: true
+                            });
+                            this.applyData(seeded);
+                        } else if (localData && confirm(`Browser ini masih menyimpan ${localData.items.length} item dari versi lama (sebelum database bersama).\n\nUnggah data tersebut ke database bersama? Data di database akan diganti dan riwayatnya ditambahkan.\n\nPilih Batal untuk memakai data yang sudah ada di database.`)) {
+                            this.applyData(await this.api('POST', '/api/import', localData));
+                        } else {
+                            this.applyData(data);
+                        }
+                        // Keep the old local copy as a backup, but don't offer to upload it again.
+                        if (savedItems) localStorage.setItem('rekon_migrated_to_db', '1');
+                    } catch (e) {
+                        this.syncStatus = 'error';
                     }
 
-                    if (savedLogs) {
-                        this.historyLogs = JSON.parse(savedLogs);
-                    }
+                    // Refresh periodically so changes from other users appear automatically.
+                    this.pollTimer = setInterval(() => this.refreshData(), 5000);
+                    document.addEventListener('visibilitychange', () => {
+                        if (!document.hidden) this.refreshData();
+                    });
+                    this.$nextTick(() => { lucide.createIcons(); });
+                },
 
+                async api(method, url, body) {
+                    const res = await fetch(url, {
+                        method,
+                        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+                        body: body ? JSON.stringify(body) : undefined,
+                        cache: 'no-store'
+                    });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(data.error || 'Gagal terhubung ke server');
+                    return data;
+                },
+
+                applyData(data) {
                     // Fill missing tiers with 0
-                    this.items.forEach(item => {
+                    data.items.forEach(item => {
                         this.moqTiers.forEach(t => {
                             if (!item.moqPrices[t]) item.moqPrices[t] = 0;
                         });
                     });
-
+                    this.items = data.items;
+                    this.historyLogs = data.historyLogs.map(({ id, createdAt, ...log }) => ({
+                        timestamp: new Date(createdAt).toLocaleString('id-ID'),
+                        ...log
+                    }));
+                    this.selectedItemInfo = this.items.find(i => i.itemCode === this.updateForm.itemCode) || null;
+                    this.syncStatus = 'online';
+                    this.lastSyncedAt = new Date().toLocaleTimeString('id-ID');
                     this.$nextTick(() => { lucide.createIcons(); });
                 },
 
-                saveToLocalStorage() {
-                    localStorage.setItem('rekon_master_items', JSON.stringify(this.items));
-                    localStorage.setItem('rekon_history_logs', JSON.stringify(this.historyLogs));
+                async refreshData() {
+                    if (document.hidden || this.syncStatus === 'saving') return;
+                    try {
+                        const data = await this.api('GET', '/api/data');
+                        if (this.syncStatus === 'saving') return;
+                        this.applyData(data);
+                    } catch (e) {
+                        this.syncStatus = 'error';
+                    }
                 },
 
-                resetLocalStorage() {
-                    if (confirm("Apakah Anda yakin ingin mereset seluruh data tersimpan ke data awal?")) {
-                        localStorage.removeItem('rekon_master_items');
-                        localStorage.removeItem('rekon_history_logs');
-                        location.reload();
+                async save(url, body) {
+                    this.syncStatus = 'saving';
+                    try {
+                        const data = await this.api('POST', url, body);
+                        this.applyData(data);
+                        return true;
+                    } catch (e) {
+                        this.syncStatus = 'online';
+                        alert('Gagal menyimpan: ' + e.message);
+                        return false;
+                    }
+                },
+
+                async resetData() {
+                    if (confirm("Apakah Anda yakin ingin mereset seluruh data ke data awal?\n\nPerhatian: data dan riwayat akan terhapus untuk SEMUA pengguna.")) {
+                        await this.save('/api/import', { items: this.sampleItems(), clearHistory: true });
                     }
                 },
 
@@ -425,66 +497,33 @@
                     return price > 0 ? 'Rp ' + this.formatNumber(price) : 'Belum Ada (0)';
                 },
 
-                submitPriceUpdate() {
-                    const item = this.items.find(i => i.itemCode === this.updateForm.itemCode);
-                    if (!item) return;
-
-                    const oldPrice = item.moqPrices[this.updateForm.moq] || 0;
-                    const newPrice = Number(this.updateForm.newPrice);
-                    const diff = newPrice - oldPrice;
-
-                    item.moqPrices[this.updateForm.moq] = newPrice;
-
-                    const now = new Date();
-                    this.historyLogs.unshift({
-                        timestamp: now.toLocaleString('id-ID'),
-                        itemCode: item.itemCode,
-                        itemName: item.itemName,
-                        customerCode: item.customerCode,
-                        customerName: item.customerName,
+                async submitPriceUpdate() {
+                    if (!this.updateForm.itemCode || !this.updateForm.moq) return;
+                    const ok = await this.save('/api/price', {
+                        itemCode: this.updateForm.itemCode,
                         moq: this.updateForm.moq,
-                        oldPrice: oldPrice,
-                        newPrice: newPrice,
-                        diff: diff
+                        newPrice: Number(this.updateForm.newPrice)
                     });
-
-                    this.saveToLocalStorage();
-                    this.updateForm.newPrice = null;
-                    this.$nextTick(() => { lucide.createIcons(); });
+                    if (ok) this.updateForm.newPrice = null;
                 },
 
-                submitNewItem() {
-                    const newItem = {
+                async submitNewItem() {
+                    const moqPrices = {};
+                    this.moqTiers.forEach(t => {
+                        moqPrices[t] = Number(this.newItemForm.moqPrices[t]) || 0;
+                    });
+
+                    const ok = await this.save('/api/items', {
                         itemCode: this.newItemForm.itemCode,
                         itemName: this.newItemForm.itemName,
                         customerCode: this.newItemForm.customerCode,
                         customerName: this.newItemForm.customerName,
-                        moqPrices: {}
-                    };
-
-                    this.moqTiers.forEach(t => {
-                        newItem.moqPrices[t] = Number(this.newItemForm.moqPrices[t]) || 0;
+                        moqPrices
                     });
-
-                    this.items.unshift(newItem);
-
-                    const now = new Date();
-                    this.historyLogs.unshift({
-                        timestamp: now.toLocaleString('id-ID'),
-                        itemCode: newItem.itemCode,
-                        itemName: newItem.itemName,
-                        customerCode: newItem.customerCode,
-                        customerName: newItem.customerName,
-                        moq: 'ALL (NEW)',
-                        oldPrice: 0,
-                        newPrice: 0,
-                        diff: 0
-                    });
-
-                    this.saveToLocalStorage();
-                    this.openAddModal = false;
-                    this.newItemForm = { itemCode: '', itemName: '', customerCode: '', customerName: '', moqPrices: {} };
-                    this.$nextTick(() => { lucide.createIcons(); });
+                    if (ok) {
+                        this.openAddModal = false;
+                        this.newItemForm = { itemCode: '', itemName: '', customerCode: '', customerName: '', moqPrices: {} };
+                    }
                 },
 
                 handleExcelUpload(event) {
@@ -492,7 +531,7 @@
                     if (!file) return;
 
                     const reader = new FileReader();
-                    reader.onload = (e) => {
+                    reader.onload = async (e) => {
                         const data = new Uint8Array(e.target.result);
                         const workbook = XLSX.read(data, { type: 'array' });
                         const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -514,11 +553,12 @@
                             }).filter(i => i.itemCode);
 
                             if (newItems.length > 0) {
-                                this.items = newItems;
-                                this.saveToLocalStorage();
-                                alert(`Berhasil mengimpor ${newItems.length} item barang dari Excel!`);
+                                if (await this.save('/api/import', { items: newItems })) {
+                                    alert(`Berhasil mengimpor ${newItems.length} item barang dari Excel!`);
+                                }
                             }
                         }
+                        event.target.value = '';
                     };
                     reader.readAsArrayBuffer(file);
                 },
